@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+
+import sys
+import os
+import re
+import requests
+from time import sleep
+import arrow
+import argparse
+
+def check_rate_limit(api_base, exit_rather_than_wait=True):
+	url = api_base + 'rate_limit'
+	ghr = requests.get(url).json()
+	if ghr['resources']['core']['remaining'] == 0:
+		unblock_time = int(ghr['resources']['core']['reset']) +1
+		lt = arrow.get(unblock_time)
+		s = "Rate Limit Exceeded until {}\n".format(lt)
+		if exit_rather_than_wait:
+			sys.exit(0)
+		else:
+			sleep(1 + unblock_time - arrow.now().timestamp)
+
+def main():
+	descr = 'Download all the repos belonging to a given user'
+	parser = argparse.ArgumentParser(description=descr, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+	parser.add_argument('-u', '--user', dest='user', type=str, metavar='USER', default='your-username-here', help='User to query as')
+	parser.add_argument('-t', '--token', dest='token', type=str, metavar='SECONDS', default='your-access-token-here', help='auth token for requests')
+	parser.add_argument('-p', '--prefix', dest='prefix', metavar='PREFIX', default='github-', help='prefix for the user directories')
+	parser.add_argument('-s', '--size', dest='size', type=int, metavar='SIZE', default=50, help='Maximum repo size in MB to clone')
+	parser.add_argument('-x', '--exit-on-ratelimit', dest='exit', action='store_true', default=False, help='exit when ratelimited, rather than sleeping')
+	parser.add_argument('-n', '--no-update', dest='noupdate', action='store_true', default=False, help='do not update existing repos, just clone new')
+	parser.add_argument('-k', '--keyword', dest='keyword', action='store_true', default=False, help='search for repos matching keyword, rather than ')
+	parser.add_argument(dest='users', metavar='TARGET', nargs='+', default=None, help='fetch repos of TARGET(S)')
+	args = parser.parse_args()
+
+	api_base = 'https://{}:{}@api.github.com/'.format(args.user, args.token)
+
+	curdir = os.getcwd()
+	if args.keyword:
+		if args.prefix == 'github-':
+			args.prefix = 'gitkw-'
+		destdir = '{}{}'.format(args.prefix, '_'.join(args.users))
+		if not os.path.exists(destdir):
+			os.mkdir(destdir)
+		print destdir
+		os.chdir(os.path.join(curdir, destdir))
+		fetch_keyword_matches(args)
+		exit(0)
+
+	for user in args.users:
+		target = user.lower()
+		params = {'per_page': '100'}
+		repo_url = api_base + 'users/{}/repos'.format(target)
+		destdir = '{}{}'.format(args.prefix, target)
+		if not os.path.exists(destdir):
+			os.mkdir(destdir)
+		os.chdir(os.path.join(curdir, destdir))
+
+		run = True
+		while run:
+			check_rate_limit(api_base)
+			resp = requests.get(repo_url, params=params)
+			if resp.ok == False:
+				print 'got HTTP code {} for {}'.format(resp.status_code, repo_url)
+				if resp.status_code != 404:
+					print 'exiting!'
+					sys.exit(1)
+				else:
+					run = False
+
+			repos = resp.json()
+
+			for repo in repos:
+				if 'size' not in repo:
+					continue
+				if os.path.exists(repo['name']) and args.noupdate:
+					continue
+				print "\n{} -> {} [{}MB]".format(repo['name'], repo['clone_url'], repo['size']/1024)
+				if os.path.exists(repo['name']):
+					os.system('git -C {} pull'.format(repo['name']))
+				elif int(repo['size']) <= args.size*1024:
+					os.system('git clone {}'.format(repo['clone_url']))
+				else:
+					print "WARNING: not cloning oversized repo {}\n".format(repo['clone_url'])
+
+			m = re.search(r'(https://api.github.com/user/\d+/repos[^>]+)>; rel="next"', resp.headers.get('Link', ''))
+			if m:
+				repo_url = m.group(1)
+			else:
+				run = False
+
+def fetch_keyword_matches(args):
+	params = {'per_page': '100'}
+	api_base = 'https://{}:{}@api.github.com/'.format(args.user, args.token)
+	repo_url = api_base + 'search/repositories'
+	params['q'] = ' '.join(args.users)
+	check_rate_limit(api_base)
+	resp = requests.get(repo_url, params=params)
+	if resp.ok == False:
+		print 'got HTTP code {} for {}'.format(resp.status_code, repo_url)
+		if resp.status_code != 404:
+			print 'exiting!'
+			sys.exit(1)
+		else:
+			run = False
+
+	repos = resp.json()
+	for repo in repos['items']:
+		destdir = repo['full_name'].replace('/', '-')
+		if not os.path.exists(destdir):
+			os.makedirs(destdir)
+		print "\n{} -> {} [{}MB]".format(repo['full_name'], repo['clone_url'], repo['size']/1024)
+		os.system('git clone {} {}'.format(repo['clone_url'], destdir))
+
+	sys.exit()
+
+if __name__ == '__main__':
+	main()
+	sys.exit(0)
