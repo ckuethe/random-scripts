@@ -1,0 +1,6 @@
+#!/bin/bash
+
+find . \
+	-type d \
+	-name .git \
+	-exec sh -c "echo ''; echo {} | sed -e 's,/[.]git.*,,'; git -C {}/.. pull" \;
